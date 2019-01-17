@@ -29,6 +29,7 @@ from klein import Klein
 from hpedockerplugin.hpe import volume
 
 import hpedockerplugin.backend_orchestrator as orchestrator
+import hpedockerplugin.request_router as req_router
 import hpedockerplugin.request_validator as req_validator
 
 LOG = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ class VolumePlugin(object):
     """
     app = Klein()
 
-    def __init__(self, reactor, host_config, backend_configs):
+    def __init__(self, reactor, all_configs):
         """
         :param IReactorTime reactor: Reactor time interface implementation.
         :param Ihpepluginconfig : hpedefaultconfig configuration
@@ -51,14 +52,27 @@ class VolumePlugin(object):
         LOG.info(_LI('Initialize Volume Plugin'))
 
         self._reactor = reactor
-        self._host_config = host_config
-        self._backend_configs = backend_configs
-        self._req_validator = req_validator.RequestValidator(backend_configs)
 
-        # TODO: make device_scan_attempts configurable
-        # see nova/virt/libvirt/volume/iscsi.py
-        self.orchestrator = orchestrator.Orchestrator(host_config,
-                                                      backend_configs)
+        self._vol_orchestrator = None
+        if 'block' in all_configs:
+            block_configs = all_configs['block']
+            self._host_config = block_configs[0]
+            self._backend_configs = block_configs[1]
+            self._vol_orchestrator = orchestrator.VolumeBackendOrchestrator(
+                self._host_config, self._backend_configs)
+
+        self._file_orchestrator = None
+        if 'file' in all_configs:
+            file_configs = all_configs['file']
+            self._f_host_config = file_configs[0]
+            self._f_backend_configs = file_configs[1]
+            self._file_orchestrator = orchestrator.FileBackendOrchestrator(
+                    self._f_host_config, self._f_backend_configs)
+
+        self._req_router = req_router.RequestRouter(
+            vol_orchestrator=self._vol_orchestrator,
+            file_orchestrator=self._file_orchestrator,
+            all_configs=all_configs)
 
     def disconnect_volume_callback(self, connector_info):
         LOG.info(_LI('In disconnect_volume_callback: connector info is %s'),
@@ -88,7 +102,7 @@ class VolumePlugin(object):
         contents = json.loads(name.content.getvalue())
         volname = contents['Name']
 
-        return self.orchestrator.volumedriver_remove(volname)
+        return self._vol_orchestrator.volumedriver_remove(volname)
 
     @app.route("/VolumeDriver.Unmount", methods=["POST"])
     def volumedriver_unmount(self, name):
@@ -108,8 +122,8 @@ class VolumePlugin(object):
         vol_mount = volume.DEFAULT_MOUNT_VOLUME
 
         mount_id = contents['ID']
-        return self.orchestrator.volumedriver_unmount(volname,
-                                                      vol_mount, mount_id)
+        return self._vol_orchestrator.volumedriver_unmount(volname,
+                                                           vol_mount, mount_id)
 
     @app.route("/VolumeDriver.Create", methods=["POST"])
     def volumedriver_create(self, name, opts=None):
@@ -131,11 +145,16 @@ class VolumePlugin(object):
             LOG.error(msg)
             raise exception.HPEPluginCreateException(reason=msg)
 
-        volname = contents['Name']
         try:
-            self._req_validator.validate_request(contents)
-        except exception.InvalidInput as ex:
-            return json.dumps({"Err": ex.msg})
+            self._req_router.route_request(contents)
+        except exception.PluginException as ex:
+            return json.dumps({'Err': ex.msg})
+
+        volname = contents['Name']
+        # try:
+        #     self._req_validator.validate_request(contents)
+        # except exception.InvalidInput as ex:
+        #     return json.dumps({"Err": ex.msg})
 
         vol_size = volume.DEFAULT_SIZE
         vol_prov = volume.DEFAULT_PROV
@@ -152,115 +171,7 @@ class VolumePlugin(object):
 
         current_backend = DEFAULT_BACKEND_NAME
         if 'Opts' in contents and contents['Opts']:
-            # Verify valid Opts arguments.
-            valid_volume_create_opts = [
-                'compression', 'size', 'provisioning', 'flash-cache',
-                'cloneOf', 'virtualCopyOf', 'expirationHours',
-                'retentionHours', 'qos-name', 'fsOwner', 'fsMode',
-                'mountConflictDelay', 'help', 'importVol', 'cpg',
-                'snapcpg', 'scheduleName', 'scheduleFrequency',
-                'snapshotPrefix', 'expHrs', 'retHrs', 'backend',
-                'replicationGroup'
-            ]
-            valid_snap_schedule_opts = ['scheduleName', 'scheduleFrequency',
-                                        'snapshotPrefix', 'expHrs', 'retHrs']
-            mutually_exclusive = [
-                ['virtualCopyOf', 'cloneOf', 'qos-name', 'replicationGroup'],
-                ['virtualCopyOf', 'cloneOf', 'backend']
-            ]
-            for key in contents['Opts']:
-                if key not in valid_volume_create_opts:
-                    msg = (_('create volume/snapshot/clone failed, error is: '
-                             '%(key)s is not a valid option. Valid options '
-                             'are: %(valid)s') %
-                           {'key': key,
-                            'valid': valid_volume_create_opts, })
-                    LOG.error(msg)
-                    return json.dumps({u"Err": six.text_type(msg)})
-
-            # mutually exclusive options check
-            input_list = list(contents['Opts'].keys())
-            for li in mutually_exclusive:
-                if (len(list(set(input_list) & set(li))) >= 2):
-                    msg = (_('%(exclusive)s cannot be specified at the same '
-                             'time') % {'exclusive': li, })
-                    LOG.error(msg)
-                    return json.dumps({u"Err": six.text_type(msg)})
-
-            if ('backend' in contents['Opts'] and
-                    contents['Opts']['backend'] != ""):
-                current_backend = str(contents['Opts']['backend'])
-                # check if current_backend present in config file
-                if current_backend in self._backend_configs:
-                    # check if current_backend is initialised
-                    if current_backend not in self.orchestrator._manager:
-                        msg = 'Backend: %s having incorrect/missing some ' \
-                              'configuration.' % current_backend
-                        LOG.error(msg)
-                        return json.dumps({u"Err": msg})
-                else:
-                    msg = 'Backend: %s not present in config.' \
-                          % current_backend
-                    LOG.error(msg)
-                    return json.dumps({u"Err": msg})
-
-            if 'importVol' in input_list:
-                existing_ref = str(contents['Opts']['importVol'])
-                return self.orchestrator.manage_existing(volname,
-                                                         existing_ref,
-                                                         current_backend,
-                                                         contents['Opts'])
-
-            if 'help' in contents['Opts']:
-                return self._process_help(contents['Opts']['help'])
-
             # Populating the values
-            if ('size' in contents['Opts'] and
-                    contents['Opts']['size'] != ""):
-                vol_size = int(contents['Opts']['size'])
-
-            if ('provisioning' in contents['Opts'] and
-                    contents['Opts']['provisioning'] != ""):
-                vol_prov = str(contents['Opts']['provisioning'])
-
-            if ('compression' in contents['Opts'] and
-                    contents['Opts']['compression'] != ""):
-                compression_val = str(contents['Opts']['compression'])
-                if compression_val is not None:
-                    if compression_val.lower() not in valid_bool_opts:
-                        msg = \
-                            _('create volume failed, error is:'
-                              'passed compression parameter'
-                              ' do not have a valid value. '
-                              'Valid vaues are: %(valid)s') % {
-                                'valid': valid_bool_opts}
-                        LOG.error(msg)
-                        return json.dumps({u'Err': six.text_type(msg)})
-
-            if ('flash-cache' in contents['Opts'] and
-                    contents['Opts']['flash-cache'] != ""):
-                vol_flash = str(contents['Opts']['flash-cache'])
-                if vol_flash is not None:
-                    if vol_flash.lower() not in valid_bool_opts:
-                        msg = \
-                            _('create volume failed, error is:'
-                              'passed flash-cache parameter'
-                              ' do not have a valid value. '
-                              'Valid vaues are: %(valid)s') % {
-                                'valid': valid_bool_opts}
-                        LOG.error(msg)
-                        return json.dumps({u'Err': six.text_type(msg)})
-
-            if ('qos-name' in contents['Opts'] and
-                    contents['Opts']['qos-name'] != ""):
-                vol_qos = str(contents['Opts']['qos-name'])
-            if ('cpg' in contents['Opts'] and
-                    contents['Opts']['cpg'] != ""):
-                cpg = str(contents['Opts']['cpg'])
-
-            if ('snapcpg' in contents['Opts'] and
-                    contents['Opts']['snapcpg'] != ""):
-                snap_cpg = str(contents['Opts']['snapcpg'])
 
             if ('fsOwner' in contents['Opts'] and
                     contents['Opts']['fsOwner'] != ""):
@@ -351,130 +262,21 @@ class VolumePlugin(object):
                         response = json.dumps({u"Err": msg})
                         return response
 
-            rcg_name = contents['Opts'].get('replicationGroup', None)
-
         if (cpg and rcg_name) or (snap_cpg and rcg_name):
             msg = "cpg/snap_cpg and replicationGroup options cannot be " \
                   "specified together"
             return json.dumps({u"Err": msg})
 
-        # It is possible that the user configured replication in hpe.conf
-        # but didn't specify any options. In that case too, this operation
-        # must fail asking for "replicationGroup" parameter
-        # Hence this validation must be done whether "Opts" is there or not
-        try:
-            self._validate_rcg_params(rcg_name, current_backend)
-        except exception.InvalidInput as ex:
-            return json.dumps({u"Err": ex.msg})
-
-        return self.orchestrator.volumedriver_create(volname, vol_size,
-                                                     vol_prov,
-                                                     vol_flash,
-                                                     compression_val,
-                                                     vol_qos,
-                                                     fs_owner, fs_mode,
-                                                     mount_conflict_delay,
-                                                     cpg, snap_cpg,
-                                                     current_backend,
-                                                     rcg_name)
-
-    def _process_help(self, help):
-        LOG.info("Working on help content generation...")
-        if help == 'backends':
-            all_backend_names = self._backend_configs.keys()
-            initialized_backend_names = self.orchestrator._manager.keys()
-            line = "=" * 54
-            spaces = ' ' * 42
-            resp = "\n%s\nNAME%sSTATUS\n%s\n" % (line, spaces, line)
-            failed_backends = \
-                set(all_backend_names) - set(initialized_backend_names)
-            printable_len = 45
-            for backend in initialized_backend_names:
-                padding = (printable_len - len(backend)) * ' '
-                resp += "%s%s  OK\n" % (backend, padding)
-
-            for backend in failed_backends:
-                padding = (printable_len - len(backend)) * ' '
-                resp += "%s%s  FAILED\n" % (backend, padding)
-            resp += "%s\n" % line
-            return json.dumps({u'Err': resp})
-        else:
-            create_help_path = "./config/create_help.txt"
-            create_help_file = open(create_help_path, "r")
-            create_help_content = create_help_file.read()
-            create_help_file.close()
-            LOG.error(create_help_content)
-            return json.dumps({u"Err": create_help_content})
-
-    def _validate_rcg_params(self, rcg_name, backend_name):
-        LOG.info("Validating RCG: %s, backend name: %s..." % (rcg_name,
-                                                              backend_name))
-        hpepluginconfig = self._backend_configs[backend_name]
-        replication_device = hpepluginconfig.replication_device
-
-        LOG.info("Replication device: %s" % six.text_type(replication_device))
-
-        if rcg_name and not replication_device:
-            msg = "Request to create replicated volume cannot be fulfilled " \
-                  "without defining 'replication_device' entry defined in " \
-                  "hpe.conf for the backend '%s'. Please add it and execute " \
-                  "the request again." % backend_name
-            raise exception.InvalidInput(reason=msg)
-
-        if replication_device and not rcg_name:
-            backend_names = list(self._backend_configs.keys())
-            backend_names.sort()
-
-            msg = "'%s' is a replication enabled backend. " \
-                  "Request to create replicated volume cannot be fulfilled " \
-                  "without specifying 'replicationGroup' option in the " \
-                  "request. Please either specify 'replicationGroup' or use " \
-                  "a normal backend and execute the request again. List of " \
-                  "backends defined in hpe.conf: %s" % (backend_name,
-                                                        backend_names)
-            raise exception.InvalidInput(reason=msg)
-
-        if rcg_name and replication_device:
-
-            def _check_valid_replication_mode(mode):
-                valid_modes = ['synchronous', 'asynchronous', 'streaming']
-                if mode.lower() not in valid_modes:
-                    msg = "Unknown replication mode '%s' specified. Valid " \
-                          "values are 'synchronous | asynchronous | " \
-                          "streaming'" % mode
-                    raise exception.InvalidInput(reason=msg)
-
-            rep_mode = replication_device['replication_mode'].lower()
-            _check_valid_replication_mode(rep_mode)
-            if replication_device.get('quorum_witness_ip'):
-                if rep_mode.lower() != 'synchronous':
-                    msg = "For Peer Persistence, replication mode must be " \
-                          "synchronous"
-                    raise exception.InvalidInput(reason=msg)
-
-            sync_period = replication_device.get('sync_period')
-            if sync_period and rep_mode == 'synchronous':
-                msg = "'sync_period' can be defined only for 'asynchronous'" \
-                      " and 'streaming' replicate modes"
-                raise exception.InvalidInput(reason=msg)
-
-            if (rep_mode == 'asynchronous' or rep_mode == 'streaming')\
-                    and sync_period:
-                try:
-                    sync_period = int(sync_period)
-                except ValueError as ex:
-                    msg = "Non-integer value '%s' not allowed for " \
-                          "'sync_period'. %s" % (
-                              replication_device.sync_period, ex)
-                    raise exception.InvalidInput(reason=msg)
-                else:
-                    SYNC_PERIOD_LOW = 300
-                    SYNC_PERIOD_HIGH = 31622400
-                    if sync_period < SYNC_PERIOD_LOW or \
-                       sync_period > SYNC_PERIOD_HIGH:
-                        msg = "'sync_period' must be between 300 and " \
-                              "31622400 seconds."
-                        raise exception.InvalidInput(reason=msg)
+        return self._vol_orchestrator.volumedriver_create(volname, vol_size,
+                                                          vol_prov,
+                                                          vol_flash,
+                                                          compression_val,
+                                                          vol_qos,
+                                                          fs_owner, fs_mode,
+                                                          mount_conflict_delay,
+                                                          cpg, snap_cpg,
+                                                          current_backend,
+                                                          rcg_name)
 
     def _check_schedule_frequency(self, schedFrequency):
         freq_sched = schedFrequency
@@ -513,8 +315,8 @@ class VolumePlugin(object):
         LOG.info('hpe_storage_api - volumedriver_clone_volume '
                  'clone_options 1 : %s ' % clone_opts)
 
-        return self.orchestrator.clone_volume(src_vol_name, clone_name, size,
-                                              cpg, snap_cpg, clone_opts)
+        return self._vol_orchestrator.clone_volume(src_vol_name, clone_name, size,
+                                                   cpg, snap_cpg, clone_opts)
 
     def volumedriver_create_snapshot(self, name, mount_conflict_delay,
                                      opts=None):
@@ -631,13 +433,13 @@ class VolumePlugin(object):
                 LOG.error(msg)
                 return json.dumps({u"Err": six.text_type(msg)})
 
-        return self.orchestrator.create_snapshot(src_vol_name, schedName,
-                                                 snapshot_name, snapPrefix,
-                                                 expiration_hrs, exphrs,
-                                                 retention_hrs, rethrs,
-                                                 mount_conflict_delay,
-                                                 has_schedule,
-                                                 schedFrequency)
+        return self._vol_orchestrator.create_snapshot(src_vol_name, schedName,
+                                                      snapshot_name, snapPrefix,
+                                                      expiration_hrs, exphrs,
+                                                      retention_hrs, rethrs,
+                                                      mount_conflict_delay,
+                                                      has_schedule,
+                                                      schedFrequency)
 
     def generate_schedule_with_timestamp(self):
         current_time = datetime.datetime.now()
@@ -674,7 +476,7 @@ class VolumePlugin(object):
         mount_id = contents['ID']
 
         try:
-            return self.orchestrator.mount_volume(volname, vol_mount, mount_id)
+            return self._vol_orchestrator.mount_volume(volname, vol_mount, mount_id)
         except Exception as ex:
             return json.dumps({'Err': six.text_type(ex)})
 
@@ -690,7 +492,7 @@ class VolumePlugin(object):
         contents = json.loads(name.content.getvalue())
         volname = contents['Name']
 
-        return self.orchestrator.get_path(volname)
+        return self._vol_orchestrator.get_path(volname)
 
     @app.route("/VolumeDriver.Capabilities", methods=["POST"])
     def volumedriver_getCapabilities(self, body):
@@ -724,8 +526,8 @@ class VolumePlugin(object):
         if token_cnt == 2:
             snapname = tokens[1]
 
-        return self.orchestrator.get_volume_snap_details(volname, snapname,
-                                                         qualified_name)
+        return self._vol_orchestrator.get_volume_snap_details(volname, snapname,
+                                                              qualified_name)
 
     @app.route("/VolumeDriver.List", methods=["POST"])
     def volumedriver_list(self, body):
@@ -736,4 +538,4 @@ class VolumePlugin(object):
 
         :return: Result indicating success.
         """
-        return self.orchestrator.volumedriver_list()
+        return self._vol_orchestrator.volumedriver_list()

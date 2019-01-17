@@ -1,5 +1,5 @@
 from oslo_config import cfg
-
+from hpedockerplugin.hpe import fpg
 
 hpe3par_opts = [
     cfg.StrOpt('hpe3par_api_url',
@@ -50,6 +50,75 @@ hpe3par_opts = [
                      "key1:value1,key2:value2..."),
 ]
 
+hpe3par_file_opts = [
+    cfg.StrOpt('hpe3par_api_url',
+               default='',
+               help="3PAR WSAPI Server Url like "
+                    "https://<3par ip>:8080/api/v1",
+               deprecated_name='hp3par_api_url'),
+    cfg.StrOpt('hpe3par_username',
+               default='',
+               help="3PAR username with the 'edit' role",
+               deprecated_name='hp3par_username'),
+    cfg.StrOpt('hpe3par_password',
+               default='',
+               help="3PAR password for the user specified in hpe3par_username",
+               secret=True,
+               deprecated_name='hp3par_password'),
+    cfg.HostAddressOpt('hpe3par_san_ip',
+                       help="IP address of SAN controller",
+                       deprecated_name='hp3par_san_ip'),
+    cfg.StrOpt('hpe3par_san_login',
+               default='',
+               help="Username for SAN controller",
+               deprecated_name='hp3par_san_login'),
+    cfg.StrOpt('hpe3par_san_password',
+               default='',
+               help="Password for SAN controller",
+               secret=True,
+               deprecated_name='hp3par_san_password'),
+    cfg.PortOpt('hpe3par_san_ssh_port',
+                default=22,
+                help='SSH port to use with SAN',
+                deprecated_name='hp3par_san_ssh_port'),
+    cfg.MultiOpt('hpe3par_fpg',
+                 item_type=fpg.FPG(),
+                 help="The File Provisioning Group (FPG) to use",
+                 deprecated_name='hp3par_fpg'),
+    cfg.StrOpt('hpe3par_vfs',
+               help="Name of virtual file server",
+               deprecated_name='hp3par_vfs'),
+    cfg.BoolOpt('hpe3par_fstore_per_share',
+                default=False,
+                help="Use one filestore per share",
+                deprecated_name='hp3par_fstore_per_share'),
+    cfg.BoolOpt('hpe3par_require_cifs_ip',
+                default=False,
+                help="Require IP access rules for CIFS (in addition to user)"),
+    cfg.BoolOpt('hpe3par_debug',
+                default=False,
+                help="Enable HTTP debugging to 3PAR",
+                deprecated_name='hp3par_debug'),
+    cfg.StrOpt('hpe3par_cifs_admin_access_username',
+               default='',
+               help="File system admin user name for CIFS.",
+               deprecated_name='hp3par_cifs_admin_access_username'),
+    cfg.StrOpt('hpe3par_cifs_admin_access_password',
+               default='',
+               help="File system admin password for CIFS.",
+               secret=True,
+               deprecated_name='hp3par_cifs_admin_access_password'),
+    cfg.StrOpt('hpe3par_cifs_admin_access_domain',
+               default='LOCAL_CLUSTER',
+               help="File system domain for the CIFS admin user.",
+               deprecated_name='hp3par_cifs_admin_access_domain'),
+    cfg.StrOpt('hpe3par_share_mount_path',
+               default='/mnt/',
+               help="The path where shares will be mounted when deleting "
+                    "nested file trees.",
+               deprecated_name='hpe3par_share_mount_path'),
+]
+
 san_opts = [
     cfg.StrOpt('san_ip',
                default='',
@@ -94,8 +163,3 @@ volume_opts = [
                help='Password for specified CHAP account name.',
                secret=True),
 ]
-
-CONF = cfg.CONF
-CONF.register_opts(hpe3par_opts)
-CONF.register_opts(san_opts)
-CONF.register_opts(volume_opts)

@@ -20,7 +20,7 @@ import socket
 from config import setupcfg
 from hpe_storage_api import VolumePlugin
 
-from os import umask, remove
+from os import umask, remove, path
 from stat import S_IRUSR, S_IWUSR, S_IXUSR
 
 from twisted.internet import reactor
@@ -43,8 +43,10 @@ LOG = logging.getLogger(__name__)
 
 PLUGIN_PATH = FilePath("/run/docker/plugins/hpe.sock")
 CONFIG_FILE = '/etc/hpedockerplugin/hpe.conf'
+FILE_CONFIG_FILE = '/etc/hpedockerplugin/hpe_file.conf'
 
 CONFIG = ['--config-file', CONFIG_FILE]
+FILE_CONFIG = ['--config-file', FILE_CONFIG_FILE]
 
 
 class HPEDockerPluginService(object):
@@ -117,12 +119,32 @@ class HPEDockerPluginService(object):
         # configuration file
         # CONFIG = ['--config-file', self._config_file]
         CONFIG = ['--config-file', CONFIG_FILE]
+        FILE_CONFIG = ['--config-file', FILE_CONFIG_FILE]
 
+        all_configs = {}
         # Setup the default, hpe3parconfig, and hpelefthandconfig
         # configuration objects.
         try:
-            host_config = setupcfg.get_host_config(CONFIG)
-            backend_configs = setupcfg.get_all_backend_configs(CONFIG)
+            backend_configs = None
+            if path.exists(CONFIG_FILE):
+                host_config = setupcfg.get_host_config(CONFIG, setupcfg.CONF)
+                backend_configs = setupcfg.get_all_backend_configs(
+                    CONFIG, setupcfg.CONF)
+                all_configs['block'] = (host_config, backend_configs)
+
+            f_backend_configs = None
+            if path.exists(FILE_CONFIG_FILE):
+                f_host_config = setupcfg.get_host_config(FILE_CONFIG,
+                                                         setupcfg.FILE_CONF)
+                f_backend_configs = setupcfg.get_all_backend_configs(
+                    FILE_CONFIG, setupcfg.FILE_CONF)
+                all_configs['file'] = (f_host_config, f_backend_configs)
+
+            if backend_configs is None and f_backend_configs is None:
+                msg = "ERROR: None of the hpe.conf or hpe_file.conf file " \
+                      "exists!"
+                LOG.error(msg)
+                raise exception.HPEPluginStartPluginException(msg)
         except Exception as ex:
             msg = (_('hpe3pardocker setupservice failed, error is: %s'),
                    six.text_type(ex))
@@ -137,8 +159,7 @@ class HPEDockerPluginService(object):
         endpoint = serverFromString(self._reactor, "unix:{}:mode=600".
                                     format(PLUGIN_PATH.path))
         servicename = StreamServerEndpointService(endpoint, Site(
-            VolumePlugin(self._reactor, host_config,
-                         backend_configs).app.resource()))
+            VolumePlugin(self._reactor, all_configs).app.resource()))
         return servicename
 
 

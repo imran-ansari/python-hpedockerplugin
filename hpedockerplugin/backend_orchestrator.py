@@ -14,7 +14,7 @@
 
 """
 
-This class will be top-level orchestrator for invoking volume operations
+This class will be top-level _vol_orchestrator for invoking volume operations
 like create, list, mount, unmount, remove operations on different backends.
 
 "backend" here refers to grouping of details for particular 3PAR array
@@ -25,10 +25,12 @@ Eg.
 
 
 """
+import abc
 import json
 from oslo_log import log as logging
 import hpedockerplugin.etcdutil as util
 import hpedockerplugin.volume_manager as mgr
+import hpedockerplugin.file_manager as fmgr
 import threading
 
 import hpedockerplugin.exception as exception
@@ -44,6 +46,8 @@ class Orchestrator(object):
         self.etcd_util = self._get_etcd_util(host_config)
         self._manager = self.initialize_manager_objects(host_config,
                                                         backend_configs)
+
+        self._backend_configs = backend_configs
 
         # This is the dictionary which have the volume -> backend map entries
         # cache after doing an etcd volume read operation.
@@ -64,7 +68,7 @@ class Orchestrator(object):
         for backend_name, config in backend_configs.items():
             try:
                 LOG.info('INITIALIZING backend: %s' % backend_name)
-                manager_objs[backend_name] = mgr.VolumeManager(
+                manager_objs[backend_name] = self._get_manager(
                     host_config,
                     config,
                     self.etcd_util,
@@ -119,7 +123,7 @@ class Orchestrator(object):
         finally:
             self.volume_backend_lock.release()
 
-    def __execute_request(self, backend, request, volname, *args, **kwargs):
+    def _execute_request_for_backend(self, backend, request, volname, *args, **kwargs):
         LOG.info(' Operating on backend : %s on volume %s '
                  % (backend, volname))
         LOG.info(' Request %s ' % request)
@@ -130,16 +134,25 @@ class Orchestrator(object):
             # populate the volume backend map for caching
             return getattr(volume_mgr, request)(volname, *args, **kwargs)
 
-        msg = "ERROR: Backend '%s' was NOT initialized successfully." \
-              " Please check hpe.conf for incorrect entries and rectify " \
-              "it." % backend
+        msg = "ERROR: Either backend '%s' doesn't exist or it could NOT be " \
+              "initialized successfully. Please check hpe.conf for incorrect " \
+              "entries and rectify it." % backend
         LOG.error(msg)
         return json.dumps({u'Err': msg})
 
     def _execute_request(self, request, volname, *args, **kwargs):
         backend = self.get_volume_backend_details(volname)
-        return self.__execute_request(
+        return self._execute_request_for_backend(
             backend, request, volname, *args, **kwargs)
+
+    @abc.abstractmethod
+    def _get_manager(self, host_config, config, etcd_util, backend_name):
+        pass
+
+
+class VolumeBackendOrchestrator(Orchestrator):
+    def _get_manager(self, host_config, config, etcd_util, backend_name):
+        return mgr.VolumeManager(host_config, config, etcd_util, backend_name)
 
     def volumedriver_remove(self, volname):
         ret_val = self._execute_request('remove_volume', volname)
@@ -164,7 +177,7 @@ class Orchestrator(object):
                             fs_mode, fs_owner,
                             mount_conflict_delay, cpg,
                             snap_cpg, current_backend, rcg_name):
-        ret_val = self.__execute_request(
+        ret_val = self._execute_request_for_backend(
             current_backend,
             'create_volume',
             volname,
@@ -188,7 +201,7 @@ class Orchestrator(object):
         # Why is backend being passed to clone_volume when it can be
         # retrieved from src_vol or use DEFAULT if src_vol doesn't have it
         backend = self.get_volume_backend_details(src_vol_name)
-        LOG.info('orchestrator clone_opts : %s' % (clone_options))
+        LOG.info('_vol_orchestrator clone_opts : %s' % (clone_options))
         return self._execute_request('clone_volume', src_vol_name, clone_name,
                                      size, cpg, snap_cpg, backend,
                                      clone_options)
@@ -226,9 +239,9 @@ class Orchestrator(object):
                                      snapname, qualified_name)
 
     def manage_existing(self, volname, existing_ref, backend, manage_opts):
-        ret_val = self.__execute_request(backend, 'manage_existing',
-                                         volname, existing_ref,
-                                         backend, manage_opts)
+        ret_val = self._execute_request_for_backend(
+            backend, 'manage_existing', volname, existing_ref, backend,
+            manage_opts)
         self.add_cache_entry(volname)
         return ret_val
 
@@ -236,3 +249,40 @@ class Orchestrator(object):
         # Use the first volume manager list volumes
         volume_mgr = next(iter(self._manager.values()))
         return volume_mgr.list_volumes()
+
+    def create_help_content(self, help):
+        LOG.info("Working on help content generation...")
+        if help == 'backends':
+            all_backend_names = self._backend_configs.keys()
+            initialized_backend_names = self._manager.keys()
+            line = "=" * 54
+            spaces = ' ' * 42
+            resp = "\n%s\nNAME%sSTATUS\n%s\n" % (line, spaces, line)
+            failed_backends = \
+                set(all_backend_names) - set(initialized_backend_names)
+            printable_len = 45
+            for backend in initialized_backend_names:
+                padding = (printable_len - len(backend)) * ' '
+                resp += "%s%s  OK\n" % (backend, padding)
+
+            for backend in failed_backends:
+                padding = (printable_len - len(backend)) * ' '
+                resp += "%s%s  FAILED\n" % (backend, padding)
+            resp += "%s\n" % line
+            return json.dumps({u'Err': resp})
+        else:
+            create_help_path = "./config/create_help.txt"
+            create_help_file = open(create_help_path, "r")
+            create_help_content = create_help_file.read()
+            create_help_file.close()
+            LOG.error(create_help_content)
+            return json.dumps({u"Err": create_help_content})
+
+
+class FileBackendOrchestrator(Orchestrator):
+    def _get_manager(self, host_config, config, etcd_util, backend_name):
+        return fmgr.FileManager(host_config, config, etcd_util, backend_name)
+
+    def create_share(self, **kwargs):
+        name = kwargs['name']
+        return self._execute_request('create_share', name, **kwargs)

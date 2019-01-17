@@ -1,6 +1,9 @@
 import logging
 import testtools
 
+from config import setupcfg
+
+import test.createshare_tester as createshare_tester
 import test.createvolume_tester as createvolume_tester
 import test.createreplicatedvolume_tester as createrepvolume_tester
 import test.clonevolume_tester as clonevolume_tester
@@ -44,6 +47,22 @@ def tc_banner_decorator(func):
 # TODO: Make this class abstract
 # Base test class containing common tests
 class HpeDockerUnitTestsBase(object):
+    def _get_real_config_file(self):
+        return '/etc/hpedockerplugin/hpe.conf'
+
+    def _get_test_config_file(self):
+        cfg_file_name = './test/config/hpe_%s.conf' % \
+                        self.protocol.lower()
+        return cfg_file_name
+
+    def _get_configs(self, cfg_param):
+        host_config = setupcfg.get_host_config(
+            cfg_param, setupcfg.FILE_CONF)
+        host_config.set_override('ssh_hosts_key_file',
+                                 data.KNOWN_HOSTS_FILE)
+        backend_configs = setupcfg.get_all_backend_configs(
+            cfg_param, setupcfg.FILE_CONF)
+        return {'block': (host_config, backend_configs)}
 
     """
     CREATE VOLUME related tests
@@ -768,4 +787,48 @@ class HpeDockerFCUnitTests(HpeDockerUnitTestsBase, testtools.TestCase):
     @tc_banner_decorator
     def test_mount_snap_fc_host_vlun_exists(self):
         test = mountvolume_tester.TestMountVolumeFCHostVLUNExists(is_snap=True)
+        test.run_test(self)
+
+
+class HpeDockerShareUnitTests(testtools.TestCase):
+    def _get_real_config_file(self):
+        return '/etc/hpedockerplugin/hpe_file.conf'
+
+    def _get_test_config_file(self):
+        cfg_file_name = './test/config/hpe_%s.conf' % \
+                        self.protocol.lower()
+        return cfg_file_name
+
+    def _get_configs(self, cfg_param):
+        host_config = setupcfg.get_host_config(
+            cfg_param, setupcfg.FILE_CONF)
+        host_config.set_override('ssh_hosts_key_file',
+                                 data.KNOWN_HOSTS_FILE)
+        backend_configs = setupcfg.get_all_backend_configs(
+            cfg_param, setupcfg.FILE_CONF)
+        return {'file': (host_config, backend_configs)}
+
+    @property
+    def protocol(self):
+        return 'file'
+
+    @tc_banner_decorator
+    def test_create_share_default(self):
+        test = createshare_tester.TestCreateShareDefault()
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_remove_regular_share(self):
+        rm_regular_vol = removevolume_tester.TestRemoveShare.Regular()
+        test = removevolume_tester.TestRemoveShare(rm_regular_vol)
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_mount_nfs_share(self):
+        test = mountvolume_tester.TestMountNfsShare()
+        test.run_test(self)
+
+    @tc_banner_decorator
+    def test_mount_nfs_share(self):
+        test = mountvolume_tester.TestMountNfsShare()
         test.run_test(self)

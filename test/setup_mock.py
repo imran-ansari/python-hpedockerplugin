@@ -4,9 +4,6 @@ import test.fake_3par_data as data
 from hpedockerplugin.hpe import hpe_3par_common as hpecommon
 from hpedockerplugin import volume_manager as mgr
 from hpedockerplugin import backend_orchestrator as orch
-from oslo_config import cfg
-
-CONF = cfg.CONF
 
 
 def mock_decorator(func):
@@ -33,9 +30,9 @@ def mock_decorator(func):
     def setup_mock_wrapper(self, mock_3parclient, mock_etcd, mock_fileutil,
                            mock_iscsi_connector, mock_fc_connector,
                            *args, **kwargs):
-        # Override the value as without it it throws an exception
-        CONF.set_override('ssh_hosts_key_file',
-                          data.KNOWN_HOSTS_FILE)
+        # # Override the value as without it it throws an exception
+        # CONF.set_override('ssh_hosts_key_file',
+        #                   data.KNOWN_HOSTS_FILE)
 
         mock_3parclient.configure_mock(**data.mock_client_conf)
         mock_3parclient.getWsApiVersion.return_value = \
